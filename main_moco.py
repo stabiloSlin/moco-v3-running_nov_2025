@@ -35,6 +35,7 @@ import moco.loader
 import moco.optimizer
 
 import vits
+import wandb
 
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
@@ -57,7 +58,7 @@ parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=4096, type=int,
+parser.add_argument('-b', '--batch-size', default=254, type=int,
                     metavar='N',
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on all nodes when '
@@ -219,7 +220,8 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         # AllGather/rank implementation in this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
-    print(model) # print model after SyncBatchNorm
+    # UPDATE NOTE: Print model after SyncBatchNorm conversion DEACTIVATED because it can be very large
+    # print(model) # print model after SyncBatchNorm
 
     if args.optimizer == 'lars':
         optimizer = moco.optimizer.LARS(model.parameters(), args.lr,
@@ -228,8 +230,8 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.optimizer == 'adamw':
         optimizer = torch.optim.AdamW(model.parameters(), args.lr,
                                 weight_decay=args.weight_decay)
-        
-    scaler = torch.cuda.amp.GradScaler()
+    # UPDATE NOTE: Using GradScaler for mixed precision training on GPUs    
+    scaler = torch.amp.GradScaler("cuda") # use 'cuda' for GPU training
     summary_writer = SummaryWriter() if args.rank == 0 else None
 
     # optionally resume from a checkpoint
@@ -254,7 +256,8 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
+    # UPDATE NOTE: Changing the directory structure to match ImageFolder format
+    traindir = args.data
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
@@ -349,25 +352,43 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast(True):
+        # UPDATE NOTE: Using autocast for mixed precision training
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16): # use 'cuda' for GPU training and bfloat16 for faster processing
             loss = model(images[0], images[1], moco_m)
+            losses.update(loss.item(), images[0].size(0))
+            global_step = epoch * iters_per_epoch + i
+            if args.rank == 0:
+                summary_writer.add_scalar("loss", loss.item(), global_step)
 
-        losses.update(loss.item(), images[0].size(0))
-        if args.rank == 0:
-            summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
+                # WandB logging (initialize once per process if available)
+                try:
+                    if wandb.run is None:
+                        wandb.init(project="mocoV3-pretrain-HAN_filtered", config=vars(args))
+                    wandb.log({
+                        "loss": loss.item(),
+                        "lr": lr,
+                        "moco_m": moco_m,
+                        "data_time": data_time.val,
+                        "batch_time": batch_time.val,
+                        "epoch": epoch,
+                    }, step=global_step)
+                except Exception:
+                # If wandb isn't installed or init fails, continue without crashing
+                    print("WandB logging failed or WandB not installed.")
+                pass
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+            # compute gradient and do SGD step
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
 
-        if i % args.print_freq == 0:
-            progress.display(i)
+            if i % args.print_freq == 0:
+                progress.display(i)
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
