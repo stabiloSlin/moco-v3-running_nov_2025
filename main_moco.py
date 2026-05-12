@@ -45,8 +45,12 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
-parser.add_argument('data', metavar='DIR',
-                    help='path to dataset')
+"""parser.add_argument('data', metavar='DIR',
+                    help='path to dataset')"""
+parser.add_argument('first_data_path', metavar='DIR',
+                    help='path to first dataset')
+parser.add_argument('second_data_path', metavar='DIR',
+                    help='path to second dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -257,7 +261,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Data loading code
     # UPDATE NOTE: Changing the directory structure to match ImageFolder format
-    traindir = args.data
+    #traindir = args.data
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
@@ -286,11 +290,25 @@ def main_worker(gpu, ngpus_per_node, args):
         transforms.ToTensor(),
         normalize
     ]
-
+    """
     train_dataset = datasets.ImageFolder(
         traindir,
         moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
                                       transforms.Compose(augmentation2)))
+    """
+    
+    # Combine datasets from two directories
+    dataset1 = datasets.ImageFolder(
+        args.first_data_path,
+        moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                      transforms.Compose(augmentation2)))
+    
+    dataset2 = datasets.ImageFolder(
+        args.second_data_path,
+        moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                      transforms.Compose(augmentation2)))
+    
+    train_dataset = torch.utils.data.ConcatDataset([dataset1, dataset2])
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
